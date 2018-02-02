@@ -23,6 +23,7 @@
 from __future__ import unicode_literals
 
 import atexit
+import base64
 import codecs
 import errno
 import getopt
@@ -61,6 +62,7 @@ else:
 import dns.edns, dns.exception, dns.message, dns.name, dns.rdata, dns.rdataclass, dns.rdatatype, dns.rdtypes.ANY.NS, dns.rdtypes.IN.A, dns.rdtypes.IN.AAAA, dns.resolver, dns.rrset
 
 from dnsviz.analysis import WILDCARD_EXPLICIT_DELEGATION, PrivateAnalyst, PrivateRecursiveAnalyst, OnlineDomainNameAnalysis, NetworkConnectivityException, DNS_RAW_VERSION
+from dnsviz import cookie
 import dnsviz.format as fmt
 from dnsviz.ipaddr import IPAddr
 from dnsviz.query import StandardRecursiveQueryCD
@@ -137,13 +139,13 @@ def _init_subprocess(use_full):
 
 def _analyze(args):
     (cls, name, dlv_domain, try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, \
-            stop_at_explicit, extra_rdtypes, explicit_only, cache, cache_level, cache_lock) = args
+            stop_at_explicit, extra_rdtypes, explicit_only, cache, cache_level, cache_lock, cookie_jar) = args
     if ceiling is not None and name.is_subdomain(ceiling):
         c = ceiling
     else:
         c = name
     try:
-        a = cls(name, dlv_domain=dlv_domain, try_ipv4=try_ipv4, try_ipv6=try_ipv6, client_ipv4=client_ipv4, client_ipv6=client_ipv6, query_class_mixin=query_class_mixin, ceiling=c, edns_diagnostics=edns_diagnostics, explicit_delegations=explicit_delegations, stop_at_explicit=stop_at_explicit, odd_ports=odd_ports, extra_rdtypes=extra_rdtypes, explicit_only=explicit_only, analysis_cache=cache, cache_level=cache_level, analysis_cache_lock=cache_lock, transport_manager=tm, th_factories=th_factories, resolver=resolver)
+        a = cls(name, dlv_domain=dlv_domain, try_ipv4=try_ipv4, try_ipv6=try_ipv6, client_ipv4=client_ipv4, client_ipv6=client_ipv6, query_class_mixin=query_class_mixin, ceiling=c, edns_diagnostics=edns_diagnostics, explicit_delegations=explicit_delegations, stop_at_explicit=stop_at_explicit, odd_ports=odd_ports, extra_rdtypes=extra_rdtypes, explicit_only=explicit_only, analysis_cache=cache, cache_level=cache_level, analysis_cache_lock=cache_lock, cookie_jar=cookie_jar, th_factories=th_factories, transport_manager=tm, resolver=resolver)
         return a.analyze()
     # re-raise a KeyboardInterrupt, as this means we've been interrupted
     except KeyboardInterrupt:
@@ -166,7 +168,7 @@ class BulkAnalyst(object):
     analyst_cls = PrivateAnalyst
     use_full_resolver = True
 
-    def __init__(self, try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, stop_at_explicit, cache_level, extra_rdtypes, explicit_only, dlv_domain):
+    def __init__(self, try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, stop_at_explicit, cache_level, extra_rdtypes, explicit_only, cookie_jar, dlv_domain):
         self.try_ipv4 = try_ipv4
         self.try_ipv6 = try_ipv6
         self.client_ipv4 = client_ipv4
@@ -178,6 +180,7 @@ class BulkAnalyst(object):
         self.cache_level = cache_level
         self.extra_rdtypes = extra_rdtypes
         self.explicit_only = explicit_only
+        self.cookie_jar = cookie_jar
         self.dlv_domain = dlv_domain
 
         self.cache = {}
@@ -185,7 +188,7 @@ class BulkAnalyst(object):
 
     def _name_to_args_iter(self, names):
         for name in names:
-            yield (self.analyst_cls, name, self.dlv_domain, self.try_ipv4, self.try_ipv6, self.client_ipv4, self.client_ipv6, self.query_class_mixin, self.ceiling, self.edns_diagnostics, self.stop_at_explicit, self.extra_rdtypes, self.explicit_only, self.cache, self.cache_level, self.cache_lock)
+            yield (self.analyst_cls, name, self.dlv_domain, self.try_ipv4, self.try_ipv6, self.client_ipv4, self.client_ipv6, self.query_class_mixin, self.ceiling, self.edns_diagnostics, self.stop_at_explicit, self.extra_rdtypes, self.explicit_only, self.cache, self.cache_level, self.cache_lock, self.cookie_jar)
 
     def analyze(self, names, flush_func=None):
         name_objs = []
@@ -275,8 +278,8 @@ class ParallelAnalystMixin(object):
     analyst_cls = MultiProcessAnalyst
     use_full_resolver = None
 
-    def __init__(self, try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, stop_at_explicit, cache_level, extra_rdtypes, explicit_only, dlv_domain, processes):
-        super(ParallelAnalystMixin, self).__init__(try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, stop_at_explicit, cache_level, extra_rdtypes, explicit_only, dlv_domain)
+    def __init__(self, try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, stop_at_explicit, cache_level, extra_rdtypes, explicit_only, cookie_jar, dlv_domain, processes):
+        super(ParallelAnalystMixin, self).__init__(try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, stop_at_explicit, cache_level, extra_rdtypes, explicit_only, cookie_jar, dlv_domain)
         self.manager = multiprocessing.managers.SyncManager()
         self.manager.start()
 
@@ -731,6 +734,7 @@ def main(argv):
         # get all the options for which there might be multiple values
         explicit_delegations = {}
         odd_ports = {}
+        cookie_jar = None
         stop_at_explicit = {}
         client_ipv4 = None
         client_ipv6 = None
@@ -859,9 +863,8 @@ def main(argv):
             usage('-N may only be used in conjunction with -A.')
             sys.exit(1)
 
-        if '-D' in opts and '-N' not in opts:
-            #TODO retrieve NS/A/AAAA if -D is specified but -N is not
-            usage('-D may only be used in conjunction with -N.')
+        if '-D' in opts and '-A' not in opts:
+            usage('-D may only be used in conjunction with -A.')
             sys.exit(1)
 
         if '-4' in opts and '-6' in opts:
@@ -1022,8 +1025,9 @@ def main(argv):
             debug_level = logging.ERROR
         logger.setLevel(debug_level)
 
+        my_ipv4 = get_client_address(A_ROOT_IPV4)
         if '-A' in opts:
-            if try_ipv4 and get_client_address(A_ROOT_IPV4) is None:
+            if try_ipv4 and my_ipv4 is None:
                 logger.warning('No global IPv4 connectivity detected')
             if try_ipv6 and get_client_address(A_ROOT_IPV6) is None:
                 logger.warning('No global IPv6 connectivity detected')
@@ -1059,6 +1063,16 @@ def main(argv):
             if major_vers != curr_major_vers or minor_vers > curr_minor_vers:
                 logger.error('Version %d.%d of JSON input is incompatible with this software.' % (major_vers, minor_vers))
                 sys.exit(3)
+
+            dnsviz_meta = analysis_structured['_meta._dnsviz.']
+            if 'cookie' in dnsviz_meta:
+                alg_str = dnsviz_meta['cookie']['algorithm']
+                cookie_jar = cookie.cookie_jar_from_text(alg_str, IPAddr(dnsviz_meta['cookie']['client']), base64.b64decode(dnsviz_meta['cookie']['secret']))
+            else:
+                cookie_jar = None
+
+        else:
+            cookie_jar = cookie.HMACSha25664CookieJar(my_ipv4, os.urandom(8), 'CS')
 
         names = []
         if '-f' in opts:
@@ -1125,6 +1139,12 @@ def main(argv):
             fh.write(s[lindex+1:rindex]+',')
 
         dnsviz_meta = { 'version': DNS_RAW_VERSION, 'names': [lb2s(n.to_text()) for n in names] }
+        if cookie_jar is not None:
+            dnsviz_meta['cookie'] = {
+                    'algorithm': cookie_jar.to_text(),
+                    'secret': lb2s(base64.b64encode(cookie_jar.secret)),
+                    'client': cookie_jar.client,
+            }
 
         flush = '-F' in opts
 
@@ -1145,16 +1165,16 @@ def main(argv):
                 if name.canonicalize().to_text() not in analysis_structured:
                     logger.error('The domain name was not found in the analysis input: "%s"' % name.to_text())
                     continue
-                name_objs.append(OnlineDomainNameAnalysis.deserialize(name, analysis_structured, cache))
+                name_objs.append(OnlineDomainNameAnalysis.deserialize(name, analysis_structured, cookie_jar, cache))
         else:
             if '-t' in opts:
-                a = cls(try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, stop_at_explicit, cache_level, rdtypes, explicit_only, dlv_domain, processes)
+                a = cls(try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, stop_at_explicit, cache_level, rdtypes, explicit_only, cookie_jar, dlv_domain, processes)
             else:
                 if cls.use_full_resolver:
                     _init_full_resolver()
                 else:
                     _init_stub_resolver()
-                a = cls(try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, stop_at_explicit, cache_level, rdtypes, explicit_only, dlv_domain)
+                a = cls(try_ipv4, try_ipv6, client_ipv4, client_ipv6, query_class_mixin, ceiling, edns_diagnostics, stop_at_explicit, cache_level, rdtypes, explicit_only, cookie_jar, dlv_domain)
                 if flush:
                     fh.write('{')
                     a.analyze(names, _flush)

@@ -22,6 +22,7 @@
 
 from __future__ import unicode_literals
 
+import base64
 import codecs
 import getopt
 import io
@@ -40,7 +41,9 @@ except ImportError:
 import dns.exception, dns.name
 
 from dnsviz.analysis import OfflineDomainNameAnalysis, DNS_RAW_VERSION
+from dnsviz import cookie
 from dnsviz.format import latin1_binary_to_string as lb2s
+from dnsviz.ipaddr import IPAddr
 from dnsviz.util import get_trusted_keys
 
 # If the import of DNSAuthGraph fails because of the lack of pygraphviz, it
@@ -240,6 +243,13 @@ def main(argv):
             logger.error('Version %d.%d of JSON input is incompatible with this software.' % (major_vers, minor_vers))
             sys.exit(3)
 
+        dnsviz_meta = analysis_structured['_meta._dnsviz.']
+        if 'cookie' in dnsviz_meta:
+            alg_str = dnsviz_meta['cookie']['algorithm']
+            cookie_jar = cookie.cookie_jar_from_text(alg_str, IPAddr(dnsviz_meta['cookie']['client']), base64.b64decode(dnsviz_meta['cookie']['secret']))
+        else:
+            cookie_jar = None
+
         names = []
         if '-f' in opts:
             if opts['-f'] == '-':
@@ -305,7 +315,7 @@ def main(argv):
             if name_str not in analysis_structured or analysis_structured[name_str].get('stub', True):
                 logger.error('The analysis of "%s" was not found in the input.' % lb2s(name.to_text()))
                 continue
-            name_obj = OfflineDomainNameAnalysis.deserialize(name, analysis_structured, cache)
+            name_obj = OfflineDomainNameAnalysis.deserialize(name, analysis_structured, cookie_jar, cache)
             name_objs.append(name_obj)
 
         if not name_objs:

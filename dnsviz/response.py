@@ -105,7 +105,7 @@ class DNSResponse:
         else:
             s += 'EDNS%d_%d_%d' % (self.query.edns, (self.query.edns_flags & 0xffff), self.query.edns_max_udp_payload)
             for opt in self.query.edns_options:
-                s += '_%d' % opt.otype
+                s += '_%d|%d' % (opt.otype, len(opt.data))
         return s
 
     def effective_query_tag(self):
@@ -120,7 +120,7 @@ class DNSResponse:
         else:
             s += 'EDNS%d_%d_%d' % (self.effective_edns, (self.effective_edns_flags & 0xffff), self.effective_edns_max_udp_payload)
             for opt in self.effective_edns_options:
-                s += '_%d' % opt.otype
+                s += '_%d|%d' % (opt.otype, len(opt.data))
         return s
 
     def section_rr_count(self, section):

@@ -720,7 +720,7 @@ class NSECStatusNODATA(NSECStatus):
     def _set_validation_status(self, nsec_set_info):
         self.validation_status = NSEC_STATUS_VALID
         if self.nsec_for_qname is not None:
-            # RFC 4034 5.2, 6840 4.4
+            # RFC 4035 5.2, 6840 4.4
             if self.rdtype == dns.rdatatype.DS or self.referral:
                 if self.is_zone and not self.has_ns:
                     self.errors.append(Errors.ReferralWithoutNSBitNSEC(sname=fmt.humanize_name(self.qname)))
